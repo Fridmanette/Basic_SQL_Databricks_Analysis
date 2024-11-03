@@ -1,0 +1,162 @@
+# File location and type
+file_location = "/FileStore/tables/iot_devices.json"
+file_type = "json"
+
+# CSV options
+infer_schema = "false"
+first_row_is_header = "false"
+delimiter = ","
+
+# The applied options are for CSV files. For other file types, these will be ignored.
+df = spark.read.format(file_type) \
+  .option("inferSchema", infer_schema) \
+  .option("header", first_row_is_header) \
+  .option("sep", delimiter) \
+  .load(file_location)
+
+display(df)
+
+
+# Create a view or table
+
+temp_table_name = "iot_devices_json"
+
+df.createOrReplaceTempView(temp_table_name)
+df.count()
+
+
+%sql
+
+/* Query the created temp table in a SQL cell */
+
+select * from `iot_devices_json` where cn = 'Poland' and device_name like 'sensor-pad%'
+
+
+permanent_table_name = "iot_devices_json"
+
+
+from pyspark.sql.functions import col, asc, count, when
+TempFilter1 = df.filter(col("cn") == "Poland").filter(col("device_name").like("sensor-pad%"))
+sensor_poland = TempFilter1.count()
+
+print(f"Number of sensor pads from Poland: {sensor_poland}")
+
+df.where((col('cn') == "Poland") & (col('device_name').like("sensor-pad%"))).count()
+
+
+df.select("lcd").distinct().show()
+distinct_color_count = df.select("lcd").distinct().count()
+print(f"Number of distinct LCD colors: {distinct_color_count}")
+
+
+mac_devices_df = df.filter(col("device_name").like("device-mac%"))
+
+# Group by country ("cn") and count the number of MAC devices
+country_mac_counts = mac_devices_df.groupBy("cn").agg(count("device_name").alias("mac_device_count"))
+
+# Order by the count in descending order and select the top 5 countries
+top_countries = country_mac_counts.orderBy("mac_device_count", ascending=False).limit(5)
+
+# Show the results
+top_countries.show()
+
+
+# Select numerical columns
+selected_df = df.select("battery_level", "c02_level", "temp")
+
+# Drop any rows with null values in these columns
+selected_df = selected_df.na.drop()
+
+
+from pyspark.ml.feature import VectorAssembler, StandardScaler
+
+# Assemble features into a vector
+assembler = VectorAssembler(inputCols=["battery_level", "c02_level", "temp"], outputCol="features")
+assembled_df = assembler.transform(selected_df)
+
+# Scale the features
+scaler = StandardScaler(inputCol="features", outputCol="scaled_features", withStd=True, withMean=True)
+scaler_model = scaler.fit(assembled_df)
+scaled_df = scaler_model.transform(assembled_df)
+
+
+import pandas as pd
+from scipy.cluster.hierarchy import dendrogram, linkage
+import matplotlib.pyplot as plt
+
+# Take a small sample to make the dendrogram plotting feasible
+sample_data = scaled_df.select("scaled_features").limit(50).toPandas()
+sample_features = pd.DataFrame(sample_data["scaled_features"].tolist())
+
+# Perform hierarchical clustering using SciPy
+Z = linkage(sample_features, method="ward")
+
+# Plot the dendrogram
+plt.figure(figsize=(10, 7))
+dendrogram(Z, labels=sample_features.index.tolist())
+plt.title("Hierarchical Clustering Dendrogram")
+plt.xlabel("Device Index")
+plt.ylabel("Distance")
+plt.show()
+
+
+# List of column pairs to analyze
+columns_to_compare = [("temp", "c02_level"), ("battery_level", "temp"), ("battery_level", "c02_level")]
+
+# Calculate and display correlations for each pair
+for col1, col2 in columns_to_compare:
+    corr_value = df.stat.corr(col1, col2)
+    print(f"The correlation between {col1} and {col2} is: {corr_value}")
+
+
+import seaborn as sns
+
+# Select numerical columns and convert to Pandas
+numerical_data = df.select("battery_level", "temp", "c02_level", "humidity").toPandas()
+
+# Calculate correlations
+correlation_matrix = numerical_data.corr()
+
+# Plot the heatmap
+plt.figure(figsize=(8, 6))
+sns.heatmap(correlation_matrix, annot=True, cmap="coolwarm", vmin=-1, vmax=1)
+plt.title("Correlation Heatmap of IoT Features")
+plt.show()
+
+
+from pyspark.ml.feature import VectorAssembler
+from pyspark.ml.classification import OneVsRest
+from pyspark.ml.clustering import KMeans
+from pyspark.ml.feature import StandardScaler
+from pyspark.ml import Pipeline
+
+# Prepare data for Isolation Forest or other anomaly detection
+assembler = VectorAssembler(inputCols=["battery_level", "c02_level", "temp"], outputCol="features")
+device_features = assembler.transform(df).select("features")
+
+# Set up an Isolation Forest (if available) or use KMeans as a proxy for anomaly detection
+isolation_forest = KMeans(k=2, seed=1, featuresCol="features")
+model = isolation_forest.fit(device_features)
+
+# Use the model to predict clusters
+predictions = model.transform(device_features)
+predictions.show()
+
+
+from pyspark.sql.functions import when, col, count
+
+# Step 1: Create a new DataFrame with a brand column
+device_dist = df.withColumn(
+    "brand",
+    when(col("device_name").like("device-mac%"), "Mac")
+    .when(col("device_name").like("device-samsung%"), "Samsung")
+    .when(col("device_name").like("device-apple%"), "Apple")
+    .when(col("device_name").like("device-dell%"), "Dell")
+    .otherwise("Other")
+)
+
+# Step 2: Group by country and brand, then count devices
+device_dist = device_dist.groupBy("cn", "brand").agg(count("device_name").alias("device_count"))
+
+# Show the new DataFrame with device counts by country and brand
+device_dist.show()
